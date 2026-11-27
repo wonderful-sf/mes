@@ -11,10 +11,7 @@ target/
 *.log
 
 # 运行时数据库与上传附件
-data/
-**/data/
 uploads/
-*.db
 *.db-shm
 *.db-wal
 
