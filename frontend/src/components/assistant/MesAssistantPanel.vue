@@ -8,41 +8,120 @@
   >
     <header class="assistant-header">
       <el-icon class="assistant-icon" aria-hidden="true"><ChatDotRound /></el-icon>
-      <h2 id="mes-assistant-heading">MES 助手</h2>
-      <el-button text circle aria-label="关闭 MES 助手" @click="$emit('close')">
-        <el-icon><Close /></el-icon>
-      </el-button>
+      <h2 id="mes-assistant-heading">云枢小助手</h2>
+      <div class="assistant-header-actions">
+        <el-button v-if="turns.length" text size="small" :disabled="Boolean(busy)" @click="newSession">新会话</el-button>
+        <el-button text circle aria-label="关闭云枢小助手" @click="$emit('close')"><el-icon><Close /></el-icon></el-button>
+      </div>
     </header>
 
-    <div ref="transcript" class="assistant-transcript" role="log" aria-label="MES 问答记录">
-      <div v-if="!messages.length" class="assistant-welcome">
-        <h3>想了解哪个功能？</h3>
+    <div ref="transcript" class="assistant-transcript">
+      <div v-if="!turns.length" class="assistant-welcome">
+        <h3>今天要做什么？</h3>
         <button v-for="example in examples" :key="example" type="button" class="assistant-example" @click="useExample(example)">
           {{ example }}
           <el-icon aria-hidden="true"><ArrowRight /></el-icon>
         </button>
       </div>
-      <article v-for="(message, index) in messages" :key="index" class="assistant-turn" :class="'assistant-turn--' + message.role">
-        <div v-if="message.role === 'user'" class="assistant-question">{{ message.text }}</div>
-        <template v-else>
-          <p v-if="message.text" class="assistant-message">{{ message.text }}</p>
-          <div v-for="section in message.sections" :key="section.title" class="assistant-answer">
-            <h3>{{ section.title }}</h3>
-            <p>{{ section.summary }}</p>
-            <ol v-if="section.steps.length > 1">
-              <li v-for="step in section.steps" :key="step">{{ step }}</li>
-            </ol>
-            <p v-else-if="section.steps.length">{{ section.steps[0] }}</p>
-          </div>
-          <div v-if="message.links.length" class="assistant-links" aria-label="相关页面">
-            <RouterLink v-for="link in message.links" :key="link.path" :to="link.path" @click="afterLink">
-              打开{{ link.label }} <el-icon aria-hidden="true"><ArrowRight /></el-icon>
-            </RouterLink>
+      <div v-else role="log" aria-label="应用搭建对话">
+        <article v-for="(turn, index) in turns" :key="index" class="assistant-turn" :class="'assistant-turn--' + turn.role">
+          <div v-if="turn.role === 'user'" class="assistant-question">{{ turn.message }}</div>
+          <p v-else class="assistant-message">{{ turn.message }}</p>
+        </article>
+      </div>
+      <p v-if="busy" class="assistant-state" role="status">{{ busy }}</p>
+      <p v-if="error" class="assistant-state assistant-error" role="alert">{{ error }}</p>
+
+      <section v-if="state?.draft" class="assistant-plan" aria-label="应用上线方案">
+        <div class="plan-heading">
+          <h3>{{ state.draft.name }}</h3>
+          <span class="plan-state" :class="{ 'is-published': state.published }">{{ state.published ? '已上线' : '草稿已保存' }}</span>
+        </div>
+        <p v-if="state.draft.description" class="plan-description">{{ state.draft.description }}</p>
+        <template v-if="!state.published">
+          <details v-for="table in state.draft.tables" :key="table.key" class="plan-table">
+            <summary>{{ table.name }} <span>{{ table.fields.length }} 个字段</span></summary>
+            <ul>
+              <li v-for="field in table.fields" :key="field.key">
+                <strong>{{ field.name }}</strong>
+                <span>{{ describeField(field) }}{{ field.required ? ' · 必填' : '' }}</span>
+              </li>
+            </ul>
+          </details>
+          <p class="plan-description">每张表上线后会生成录入表单、列表、筛选和菜单。</p>
+          <label class="plan-tenant">
+            <span>授权租户</span>
+            <select :value="state.tenantId || ''" :disabled="Boolean(busy)" @change="selectTenant($event.target.value)">
+              <option value="">选择已有租户</option>
+              <option v-for="tenant in state.tenants" :key="tenant.id" :value="tenant.id">{{ tenant.name }}（{{ tenant.code }}）</option>
+            </select>
+          </label>
+          <div class="plan-actions">
+            <RouterLink to="/studio/apps" @click="afterLink">查看应用草稿</RouterLink>
+            <el-button type="primary" :loading="publishing" :disabled="Boolean(busy) || !selectedTenant" @click="publish">
+              确认发布并授权
+            </el-button>
           </div>
         </template>
-      </article>
-      <p v-if="sending" class="assistant-state">正在查找相关操作说明…</p>
-      <p v-if="error" class="assistant-state assistant-error" role="alert">{{ error }}</p>
+        <template v-else>
+          <p class="plan-description">已发布 {{ state.draft.tables.length }} 张表，并授权给 {{ state.publishedTenantName }}。</p>
+          <div class="assistant-links" aria-label="已上线页面">
+            <RouterLink v-for="link in visibleLinks" :key="link.path" :to="link.path" @click="afterLink">
+              打开{{ link.label }} <el-icon aria-hidden="true"><ArrowRight /></el-icon>
+            </RouterLink>
+            <RouterLink to="/studio/apps" @click="afterLink">打开应用管理 <el-icon aria-hidden="true"><ArrowRight /></el-icon></RouterLink>
+          </div>
+        </template>
+      </section>
+      <section v-if="state?.iam" class="assistant-plan" aria-label="租户与岗位角色方案">
+        <div class="plan-heading">
+          <h3>{{ state.iam.action }} · {{ state.iam.name }}</h3>
+          <span class="plan-state" :class="{ 'is-published': state.iamApplied }">{{ state.iamApplied ? '已完成' : '待确认' }}</span>
+        </div>
+        <p class="plan-description">{{ state.iam.code }} · {{ state.iam.dataScope ? '所属租户' : '上级租户' }} {{ state.iam.tenantName }}</p>
+        <template v-if="state.iam.dataScope">
+          <p class="plan-description">数据范围 {{ state.iam.dataScope }}</p>
+          <p class="plan-description">可见菜单 {{ state.iam.menuScope.join('、') }}</p>
+          <details class="plan-table" open>
+            <summary>保存后的权限 <span>{{ state.iam.services.length }} 项</span></summary>
+            <ul><li v-for="service in state.iam.services" :key="service">{{ service }}</li></ul>
+          </details>
+          <details v-if="state.iam.removedServices.length" class="plan-table" open>
+            <summary>将移除的权限</summary>
+            <ul><li v-for="service in state.iam.removedServices" :key="service">{{ service }}</li></ul>
+          </details>
+        </template>
+        <div class="plan-actions">
+          <RouterLink :to="authStore.isSystemAdmin ? '/studio/iam' : '/tenant-admin'" @click="afterLink">查看租户与角色</RouterLink>
+          <el-button v-if="!state.iamApplied" type="primary" :disabled="Boolean(busy)" @click="confirmIam">确认{{ state.iam.action }}</el-button>
+        </div>
+      </section>
+      <section v-if="state?.edit" class="assistant-plan" aria-label="已有应用版本变更">
+        <div class="plan-heading">
+          <h3>{{ state.edit.target.appName }}</h3>
+          <span class="plan-state" :class="{ 'is-published': state.published }">{{ state.published ? '新版本已上线' : '新版本草稿已保存' }}</span>
+        </div>
+        <p class="plan-description">{{ state.edit.target.tableName }} · {{ state.edit.baseVersion }} → {{ state.edit.newVersion }}</p>
+        <details class="plan-table" open>
+          <summary>字段变更 <span>{{ state.edit.changes.length }} 项</span></summary>
+          <ul>
+            <li v-for="field in state.edit.changes" :key="field.key">
+              <strong>{{ field.label }}</strong>
+              <span>{{ field.previousLabel ? '由「' + field.previousLabel + '」更名' : '新增 · ' + (fieldNames[field.type] || field.type) + (field.required ? ' · 必填' : '') }}</span>
+            </li>
+          </ul>
+        </details>
+        <div v-if="!state.published" class="plan-actions">
+          <RouterLink to="/studio/models" @click="afterLink">查看数据表</RouterLink>
+          <el-button type="primary" :loading="publishing" :disabled="Boolean(busy)" @click="publish">确认发布新版本</el-button>
+        </div>
+        <div v-else class="assistant-links" aria-label="已更新页面">
+          <RouterLink v-for="link in visibleLinks" :key="link.path" :to="link.path" @click="afterLink">
+            打开{{ link.label }} <el-icon aria-hidden="true"><ArrowRight /></el-icon>
+          </RouterLink>
+          <RouterLink to="/studio/models" @click="afterLink">查看数据表 <el-icon aria-hidden="true"><ArrowRight /></el-icon></RouterLink>
+        </div>
+      </section>
     </div>
 
     <form class="assistant-compose" @submit.prevent="submit">
@@ -51,38 +130,68 @@
           ref="input"
           v-model="draft"
           rows="2"
-          maxlength="500"
-          aria-label="输入 MES 问题"
+          maxlength="1200"
+          aria-label="输入操作需求"
           @keydown.enter.exact="handleEnter"
         />
-        <el-button type="primary" native-type="submit" :loading="sending" :disabled="sending || !draft.trim()">发送</el-button>
+        <el-button type="primary" native-type="submit" :loading="sending" :disabled="Boolean(busy) || !draft.trim()">发送</el-button>
       </div>
     </form>
   </section>
 </template>
 
 <script setup>
-import { nextTick, onBeforeUnmount, ref, watch } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
-import { askMesAssistant } from '@/api/assistant';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { requestMesAssistant } from '@/api/assistant';
 import { useAppStore } from '@/stores/app';
 import { useAuthStore } from '@/stores/auth';
 
 const props = defineProps({ open: Boolean });
 const emit = defineEmits(['close', 'navigate']);
-const route = useRoute();
-const router = useRouter();
 const appStore = useAppStore();
 const authStore = useAuthStore();
 const transcript = ref(null);
 const input = ref(null);
 const draft = ref('');
-const sending = ref(false);
+const state = ref(null);
+const pendingMessage = ref('');
+const busy = ref('');
+const sending = computed(() => Boolean(pendingMessage.value));
+const publishing = ref(false);
 const error = ref('');
-const messages = ref([]);
-const previousTopics = ref([]);
-const examples = ['生产工单怎么开工？', '工序报工怎么用？', '在哪里查看工单执行记录？'];
+const storageKey = 'mes-release-session:' + authStore.currentUser?.id;
+const sessionId = ref(sessionStorage.getItem(storageKey) || makeSessionId());
+const turns = computed(() => pendingMessage.value
+  ? [...(state.value?.turns || []), { role: 'user', message: pendingMessage.value }]
+  : state.value?.turns || []);
+const selectedTenant = computed(() => state.value?.tenants.find(tenant => tenant.id === state.value?.tenantId));
+const visibleLinks = computed(() => (state.value?.links || []).filter(link => appStore.findMenuNode('', link.path)));
+const examples = computed(() => [
+  ...(authStore.canAccessStudio ? ['搭建设备点检应用，记录设备、点检日期和结果'] : []),
+  ...(authStore.canManageTenants ? ['创建一个名为一车间的租户，编码 workshop_1', '给一车间创建巡检员岗位，只能查看点检记录'] : [])
+]);
+const fieldNames = {
+  String: '文本',
+  Text: '多行文本',
+  Integer: '整数',
+  Decimal: '小数',
+  Boolean: '开关',
+  Date: '日期',
+  DateTime: '日期时间',
+  Selection: '单选',
+  ManyToOne: '关联表'
+};
 let request = null;
+
+function makeSessionId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64;
+  bytes[8] = (bytes[8] & 63) | 128;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  const id = [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
+  sessionStorage.setItem(storageKey, id);
+  return id;
+}
 
 async function scrollToLatest() {
   await nextTick();
@@ -91,6 +200,7 @@ async function scrollToLatest() {
 
 watch(() => props.open, async (isOpen) => {
   if (!isOpen) return;
+  if (!state.value && !busy.value) await perform('正在加载会话…');
   await scrollToLatest();
   input.value?.focus({ preventScroll: true });
 });
@@ -107,13 +217,13 @@ function handleEnter(event) {
   submit();
 }
 
-function canOpenLink(link) {
-  if (!link.path.startsWith('/')) return false;
-  const target = router.resolve(link.path);
-  if (target.name === 'runtime-home') return true;
-  if (target.meta.requiresStudio) return authStore.canAccessStudio;
-  if (target.meta.requiresTenantAdmin) return authStore.canManageTenants;
-  return target.name === 'runtime-menu' && Boolean(appStore.findMenuNode('', target.path));
+function describeField(field) {
+  if (field.type === 'Selection') return field.options.map(option => option.label).join(' / ');
+  if (field.type === 'ManyToOne') {
+    const table = state.value.draft.tables.find(table => table.key === field.relatedTable);
+    return '关联 ' + (table?.name || field.relatedTable);
+  }
+  return fieldNames[field.type] || field.type;
 }
 
 function afterLink(event) {
@@ -122,29 +232,61 @@ function afterLink(event) {
 
 async function submit() {
   const question = draft.value.trim();
-  if (!question || sending.value) return;
+  if (!question || busy.value) return;
   draft.value = '';
-  error.value = '';
-  messages.value.push({ role: 'user', text: question });
-  sending.value = true;
-  request = new AbortController();
+  pendingMessage.value = question;
   scrollToLatest();
+  const saved = await perform('正在整理需求并保存草稿…', '/messages', { message: question });
+  pendingMessage.value = '';
+  if (!saved && !draft.value) draft.value = question;
+  scrollToLatest();
+}
+
+function selectTenant(id) {
+  return perform('正在更新授权对象…', '/tenant', { tenantId: id || null });
+}
+
+async function publish() {
+  if (!state.value?.revision || (!state.value.edit && !selectedTenant.value) || busy.value) return;
+  publishing.value = true;
   try {
-    const reply = await askMesAssistant(authStore.token, question, route.path, previousTopics.value, request.signal);
-    messages.value.push({
-      role: 'assistant',
-      text: reply.message,
-      sections: reply.sections,
-      links: reply.links.filter(canOpenLink)
-    });
-    if (reply.topicIds.length) previousTopics.value = reply.topicIds;
-  } catch (e) {
-    if (e.name !== 'AbortError') {
-      error.value = e.message;
-      if (!draft.value) draft.value = question;
+    const label = state.value.edit ? '正在检查并发布新版本…' : '正在检查、发布和授权…';
+    if (await perform(label, '/publish', { revision: state.value.revision })) {
+      await appStore.refreshMenusAndOverview();
     }
   } finally {
-    sending.value = false;
+    publishing.value = false;
+  }
+}
+
+async function confirmIam() {
+  if (!state.value?.iamRevision || busy.value) return;
+  if (await perform('正在执行已确认的管理操作…', '/iam/confirm', { revision: state.value.iamRevision })) {
+    await appStore.loadTenants();
+  }
+}
+
+async function newSession() {
+  sessionId.value = makeSessionId();
+  state.value = null;
+  draft.value = '';
+  await perform('正在开启会话…');
+  input.value?.focus();
+}
+
+async function perform(label, action, payload) {
+  if (busy.value) return false;
+  busy.value = label;
+  error.value = '';
+  request = new AbortController();
+  try {
+    state.value = await requestMesAssistant(authStore.token, sessionId.value, action, payload, request.signal);
+    return true;
+  } catch (e) {
+    if (e.name !== 'AbortError') error.value = e.message;
+    return false;
+  } finally {
+    busy.value = '';
     request = null;
     scrollToLatest();
   }
@@ -156,7 +298,7 @@ async function submit() {
   position: absolute;
   inset: 12px 12px 12px auto;
   z-index: 4;
-  width: min(432px, calc(100% - 24px));
+  width: min(468px, calc(100% - 24px));
   display: flex;
   flex-direction: column;
   border: 1px solid var(--sidebar-rule);
@@ -174,6 +316,7 @@ async function submit() {
   background: var(--bg-header);
   border-radius: var(--radius-panel) var(--radius-panel) 0 0;
 }
+.assistant-header-actions { display: flex; align-items: center; }
 .assistant-icon {
   width: 36px;
   height: 36px;
@@ -195,7 +338,7 @@ h2 { font-size: 16px; }
   line-height: 1.65;
   overflow-wrap: anywhere;
 }
-.assistant-welcome h3, .assistant-answer h3 { margin-bottom: 7px; font-size: 14px; }
+.assistant-welcome h3 { margin-bottom: 7px; font-size: 14px; }
 .assistant-example {
   display: flex;
   justify-content: space-between;
@@ -223,13 +366,45 @@ h2 { font-size: 16px; }
   color: var(--text-main);
   white-space: pre-wrap;
 }
-.assistant-answer + .assistant-answer { border-top: 1px solid var(--border-light); margin-top: 11px; padding-top: 11px; }
-.assistant-answer p + p, .assistant-answer ol { margin: 6px 0 0; }
-.assistant-answer ol { padding-inline-start: 21px; }
-.assistant-answer li + li { margin-top: 4px; }
-.assistant-message + .assistant-answer { margin-top: 8px; }
+.assistant-message { white-space: pre-wrap; }
 .assistant-state { margin-top: 8px; color: var(--text-muted); }
 .assistant-error { color: var(--el-color-danger); }
+.assistant-plan {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--sidebar-rule);
+  border-radius: var(--radius-control);
+  background: var(--bg-card);
+}
+.plan-heading, .plan-actions, .plan-table summary, .plan-table li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.plan-heading h3 { font-size: 15px; }
+.plan-state { flex-shrink: 0; color: var(--primary); font-size: 12px; font-weight: 650; }
+.plan-state.is-published { color: var(--el-color-success); }
+.plan-description { margin: 6px 0; color: var(--text-muted); }
+.plan-table { border-top: 1px solid var(--border-light); }
+.plan-table summary { display: list-item; padding: 7px 0; font-weight: 650; cursor: pointer; }
+.plan-table summary span { float: inline-end; }
+.plan-table ul { margin: 0 0 8px; padding: 0; list-style: none; }
+.plan-table li { padding: 3px 0; }
+.plan-table summary span, .plan-table li span { color: var(--text-muted); font-size: 12px; font-weight: 400; }
+.plan-tenant { display: grid; gap: 4px; margin: 10px 0; font-weight: 650; }
+.plan-tenant select {
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
+  background: var(--bg-card);
+  color: var(--text-main);
+  font: inherit;
+  font-weight: 400;
+}
+.plan-actions { align-items: center; flex-wrap: wrap; }
+.plan-actions a { color: var(--primary); text-underline-offset: 3px; }
 .assistant-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
 .assistant-links a {
   display: inline-flex;
@@ -260,7 +435,8 @@ textarea {
   font: inherit;
   font-size: 14px;
 }
-textarea:focus-visible, .assistant-links a:focus-visible, .assistant-example:focus-visible {
+textarea:focus-visible, .assistant-links a:focus-visible, .assistant-example:focus-visible,
+.plan-table summary:focus-visible, .plan-tenant select:focus-visible, .plan-actions a:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: -2px;
 }

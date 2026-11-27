@@ -3,16 +3,15 @@ package com.edu.scnu.domain.metamodel.service;
 import com.edu.scnu.domain.metamodel.model.*;
 import com.edu.scnu.domain.shared.DomainException;
 import com.edu.scnu.domain.shared.GroovyScriptShell;
+import com.edu.scnu.domain.shared.MetadataInputRules;
 import groovy.lang.Binding;
 import groovy.lang.GroovyShell;
 import java.util.*;
-import java.util.regex.Pattern;
 
 /**
  * 元模型语义与语法校验领域服务（含 Groovy 脚本语法静态编译检验）。
  */
 public class MetaValidationDomainService {
-    private static final Pattern IDENTIFIER_PATTERN = Pattern.compile("^[a-z][a-z0-9_]*$");
     private static final Set<String> SUPPORTED_TYPES = Set.of(
             "string", "text", "integer", "long", "double", "bigdecimal", "decimal",
             "boolean", "date", "datetime", "selection", "enum", "dict",
@@ -21,14 +20,17 @@ public class MetaValidationDomainService {
 
     public List<String> validateSnapshot(ModelSnapshot snapshot, Set<String> availableModels) {
         List<String> errors = new ArrayList<>();
-        if (snapshot == null || snapshot.getName() == null || !IDENTIFIER_PATTERN.matcher(snapshot.getName()).matches()) {
-            errors.add("模型标识 (name) 必须符合 ^[a-z][a-z0-9_]*$ 命名规范");
+        if (snapshot == null) {
+            errors.add("模型定义不能为空");
             return errors;
         }
-        String table = snapshot.resolvedTableName();
-        if (!IDENTIFIER_PATTERN.matcher(table).matches()) {
-            errors.add("物理表名 (" + table + ") 必须仅由小写字母、数字和下划线组成");
+        addError(errors, MetadataInputRules.identifierError(snapshot.getName(), "模型标识"));
+        if (snapshot.getName() == null) return errors;
+        if (!snapshot.getName().equals(snapshot.resolvedTableName())) {
+            addError(errors, MetadataInputRules.identifierError(snapshot.resolvedTableName(), "物理表名"));
         }
+        if (snapshot.getDisplayName() != null) addError(errors, MetadataInputRules.nameError(snapshot.getDisplayName(), "模型显示名称", 60));
+        addError(errors, MetadataInputRules.versionError(snapshot.getVersionNo()));
         if (snapshot.getParents().contains(snapshot.getName()) && !snapshot.isExtensionPackage()) {
             errors.add("检测到循环继承：模型不能继承自身 (" + snapshot.getName() + ")");
         }
@@ -44,10 +46,19 @@ public class MetaValidationDomainService {
         Set<String> seenProps = new HashSet<>();
         GroovyShell shell = GroovyScriptShell.create(new Binding());
         for (PropertyDef prop : snapshot.getProperties()) {
-            if (prop.getName() == null || !IDENTIFIER_PATTERN.matcher(prop.getName()).matches()) {
-                errors.add("属性标识 [" + prop.getName() + "] 必须符合 ^[a-z][a-z0-9_]*$ 命名规范");
+            if (prop == null) {
+                errors.add("数据表字段不能为空");
                 continue;
             }
+            String identifierError = MetadataInputRules.identifierError(prop.getName(), "字段标识");
+            if (identifierError != null) {
+                errors.add(identifierError);
+                continue;
+            }
+            if (!prop.getName().equals(prop.resolvedColumnName())) {
+                addError(errors, MetadataInputRules.identifierError(prop.resolvedColumnName(), "字段物理列名"));
+            }
+            if (prop.getDisplayName() != null) addError(errors, MetadataInputRules.nameError(prop.getDisplayName(), "字段显示名称", 60));
             if (!seenProps.add(prop.getName())) {
                 errors.add("属性标识重复: " + prop.getName());
             }
@@ -127,5 +138,9 @@ public class MetaValidationDomainService {
         if (!errors.isEmpty()) {
             throw DomainException.invalidParams("元模型定义校验未通过，共发现 " + errors.size() + " 处错误", errors);
         }
+    }
+
+    private void addError(List<String> errors, String error) {
+        if (error != null) errors.add(error);
     }
 }

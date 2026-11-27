@@ -144,7 +144,7 @@
             </template>
           </div>
         </template>
-        <div class="lc-side-footer">
+        <div v-if="authStore.canAccessStudio || authStore.canManageTenants" class="lc-side-footer">
           <button
             ref="assistantToggle"
             type="button"
@@ -154,7 +154,7 @@
             :aria-controls="assistantOpen ? 'mes-assistant-panel' : undefined"
             @click="toggleAssistant"
           >
-            <el-icon aria-hidden="true"><ChatDotRound /></el-icon><span>MES 助手</span>
+            <el-icon aria-hidden="true"><ChatDotRound /></el-icon><span>云枢小助手</span>
           </button>
         </div>
       </nav>
@@ -174,7 +174,7 @@
           <router-view />
         </main>
       </div>
-      <MesAssistantPanel :open="assistantOpen" @close="closeAssistant" @navigate="assistantOpen = false" />
+      <MesAssistantPanel v-if="authStore.canAccessStudio || authStore.canManageTenants" :open="assistantOpen" @close="closeAssistant" @navigate="assistantOpen = false" />
     </div>
 
     <!-- 全局模型设计器与版本中心弹窗 -->

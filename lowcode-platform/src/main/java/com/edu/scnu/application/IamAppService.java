@@ -5,6 +5,7 @@ import com.edu.scnu.domain.metamodel.model.AppAggregate;
 import com.edu.scnu.domain.metamodel.repository.AppRepository;
 import com.edu.scnu.domain.shared.DomainException;
 import com.edu.scnu.domain.shared.MetaContext;
+import com.edu.scnu.domain.shared.MetadataInputRules;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -515,6 +516,10 @@ public class IamAppService {
         return role;
     }
 
+    static boolean isBuiltInRole(String code) {
+        return code != null && BUILTIN_ROLE_CODES.contains(code);
+    }
+
     public Map<String, Object> deleteRole(String roleCode) {
         if (BUILTIN_ROLE_CODES.contains(roleCode)) {
             throw DomainException.stateGuardFailed("平台基础内置角色 [" + roleCode + "] 禁止删除");
@@ -554,9 +559,8 @@ public class IamAppService {
     }
 
     public TenantDef saveTenant(TenantDef t) {
-        if (t.getCode() == null || t.getCode().isBlank() || t.getName() == null || t.getName().isBlank()) {
-            throw DomainException.invalidParams("租户编码 (code) 与名称 (name) 不能为空");
-        }
+        t.setCode(MetadataInputRules.tenantCode(t.getCode()));
+        t.setName(MetadataInputRules.tenantName(t.getName()));
         if (t.getId() == null || t.getId().isBlank()) {
             t.setId(t.getCode().trim());
         }

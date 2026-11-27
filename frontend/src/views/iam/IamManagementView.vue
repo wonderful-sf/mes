@@ -449,6 +449,15 @@ function openTenantDialog(row) {
 }
 
 async function saveTenant() {
+  const { code, name } = tenantDialog.form;
+  if (!/^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(code?.trim() || '')) {
+    ElMessage.warning('租户编码须以字母开头，最多 32 个字母、数字、下划线或短横线。');
+    return;
+  }
+  if (!name?.trim() || [...name.trim()].length > 40) {
+    ElMessage.warning('租户名称须为 1 至 40 个字符。');
+    return;
+  }
   try {
     await rpcCall('rbac_tenant', 'saveTenant', { values: tenantDialog.form });
     ElMessage.success('租户保存成功');

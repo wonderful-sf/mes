@@ -1,8 +1,8 @@
-export async function askMesAssistant(token, question, currentPath, previousTopics, signal) {
-  const response = await fetch('/api/assistant/ask', {
-    method: 'POST',
+export async function requestMesAssistant(token, sessionId, action = '', payload, signal) {
+  const response = await fetch('/api/assistant/sessions/' + sessionId + action, {
+    method: payload === undefined ? 'GET' : 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
-    body: JSON.stringify({ question, currentPath, previousTopics }),
+    body: payload === undefined ? undefined : JSON.stringify(payload),
     signal
   });
   const result = await response.json().catch(() => null);

@@ -286,6 +286,10 @@ function addService(type) {
 
 function buildSanitizedSnapshot() {
   const snap = JSON.parse(JSON.stringify(snapshot.value));
+  const identifier = /^[a-z][a-z0-9_]{0,63}$/;
+  if (!identifier.test(snap.name || '')) throw new Error('英文表名须以小写字母开头，最多 64 个字母、数字或下划线。');
+  if (!snap.displayName?.trim() || [...snap.displayName.trim()].length > 60) throw new Error('中文名称须为 1 至 60 个字符。');
+  if (!/^\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(snap.versionNo || '')) throw new Error('版本号须为三个非负整数，例如 1.0.0。');
   snap.parents = (snap._parentsCsv || '').split(',').map((s) => s.trim()).filter(Boolean);
   delete snap._parentsCsv;
   if (!snap.extendModel || !snap.extendModel.trim()) snap.extendModel = null;
@@ -297,6 +301,7 @@ function buildSanitizedSnapshot() {
     }))
     .filter((ix) => ix.columnList.length > 0);
   for (const p of snap.properties || []) {
+    if (!identifier.test(p.name || '')) throw new Error('字段英文名须以小写字母开头，最多 64 个字母、数字或下划线。');
     if (p.dataType === 'Selection' && p._valuesCsv) {
       p.values = p._valuesCsv
         .split(',')

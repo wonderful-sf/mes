@@ -1,8 +1,7 @@
 package com.edu.scnu.interfaces.rpc.controller;
 
 import com.edu.scnu.domain.shared.DomainException;
-import com.edu.scnu.interfaces.rpc.chain.RpcHandler;
-import com.edu.scnu.interfaces.rpc.chain.RpcRequestContext;
+import com.edu.scnu.interfaces.rpc.chain.RpcDispatcher;
 import com.edu.scnu.interfaces.rpc.dto.JsonRpcError;
 import com.edu.scnu.interfaces.rpc.dto.JsonRpcRequest;
 import com.edu.scnu.interfaces.rpc.dto.JsonRpcResponse;
@@ -10,7 +9,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -21,10 +19,10 @@ import java.util.Map;
 @CrossOrigin(origins = "*", allowedHeaders = "*", methods = {RequestMethod.GET, RequestMethod.POST, RequestMethod.OPTIONS})
 public class JsonRpcController {
     private static final Logger log = LoggerFactory.getLogger(JsonRpcController.class);
-    private final List<RpcHandler> handlerChain;
+    private final RpcDispatcher dispatcher;
 
-    public JsonRpcController(List<RpcHandler> handlerChain) {
-        this.handlerChain = handlerChain;
+    public JsonRpcController(RpcDispatcher dispatcher) {
+        this.dispatcher = dispatcher;
     }
 
     @io.swagger.v3.oas.annotations.Operation(
@@ -143,9 +141,7 @@ public class JsonRpcController {
     private JsonRpcResponse executeChain(String tenant, String authHeader, boolean openEndpoint, JsonRpcRequest request) {
         Object reqId = request != null ? request.getId() : null;
         try {
-            RpcRequestContext ctx = new RpcRequestContext(tenant, authHeader, openEndpoint, request);
-            RpcHandler.normalizeEnvelope(ctx);
-            Object result = invokeAt(0, ctx);
+            Object result = dispatcher.execute(tenant, authHeader, openEndpoint, request);
             return JsonRpcResponse.ok(result, reqId);
         } catch (DomainException de) {
             log.warn("RPC DomainException [{}]: {}", de.getErrorKey(), de.getMessage());
@@ -172,10 +168,4 @@ public class JsonRpcController {
         }
     }
 
-    private Object invokeAt(int index, RpcRequestContext ctx) {
-        if (index >= handlerChain.size()) {
-            throw DomainException.methodNotFound("责任链终点未处理请求");
-        }
-        return handlerChain.get(index).handle(ctx, nextCtx -> invokeAt(index + 1, nextCtx));
-    }
 }
