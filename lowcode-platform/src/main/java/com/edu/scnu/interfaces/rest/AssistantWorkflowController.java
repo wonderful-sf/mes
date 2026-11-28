@@ -67,16 +67,40 @@ public class AssistantWorkflowController {
         return authenticated(authorization, (owner, studio) -> workflow.confirmIam(owner, sessionId, authorization, request.revision()));
     }
 
+    @GetMapping("/runtime")
+    public ResponseEntity<?> readRuntime(@RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
+                                         @PathVariable UUID sessionId) {
+        return authenticated(authorization, false, (owner, studio) -> workflow.readRuntime(owner, sessionId));
+    }
+
+    @PostMapping("/runtime/messages")
+    public ResponseEntity<?> askRuntime(@RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
+                                        @PathVariable UUID sessionId, @RequestBody RuntimeAsk request) {
+        return authenticated(authorization, false, (owner, studio) ->
+                workflow.askRuntime(owner, sessionId, authorization, request.message(), request.menu()));
+    }
+
+    @PostMapping("/runtime/confirm")
+    public ResponseEntity<?> confirmRuntime(@RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
+                                            @PathVariable UUID sessionId, @RequestBody PublishRequest request) {
+        return authenticated(authorization, false, (owner, studio) ->
+                workflow.confirmRuntime(owner, sessionId, authorization, request.revision()));
+    }
+
     private void requireStudio(boolean studio) {
         if (!studio) throw DomainException.permissionDenied("当前账号没有应用管理权限。");
     }
 
-    private ResponseEntity<?> authenticated(String authorization, BiFunction<String, Boolean, AssistantWorkflow.State> operation) {
+    private ResponseEntity<?> authenticated(String authorization, BiFunction<String, Boolean, ?> operation) {
+        return authenticated(authorization, true, operation);
+    }
+
+    private ResponseEntity<?> authenticated(String authorization, boolean management, BiFunction<String, Boolean, ?> operation) {
         var user = iam.authenticate(authorization).orElse(null);
         if (user == null) return error(HttpStatus.UNAUTHORIZED, "登录已过期，请重新登录后再使用助手。");
         var profile = iam.buildProfileData(user);
         boolean studio = Boolean.TRUE.equals(profile.get("canAccessStudio"));
-        if (!studio && !Boolean.TRUE.equals(profile.get("canManageTenants"))) {
+        if (management && !studio && !Boolean.TRUE.equals(profile.get("canManageTenants"))) {
             return error(HttpStatus.FORBIDDEN, "云枢小助手需要应用或租户管理权限。");
         }
         try {
@@ -100,6 +124,7 @@ public class AssistantWorkflowController {
     }
 
     public record AskRequest(String message) {}
+    public record RuntimeAsk(String message, String menu) {}
     public record TenantRequest(String tenantId) {}
     public record PublishRequest(UUID revision) {}
 }

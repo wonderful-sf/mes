@@ -11,6 +11,7 @@ import com.edu.scnu.domain.shared.DomainException;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
+import java.time.LocalDate;
 import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.List;
@@ -30,13 +31,15 @@ public class AssistantWorkflow {
     private final AssistantPlatformActions actions;
     private final AssistantExistingAppActions existingApps;
     private final AssistantIamActions iamActions;
+    private final AssistantRuntimeActions runtime;
 
     public AssistantWorkflow(AssistantPlanner planner, AssistantPlatformActions actions, AssistantExistingAppActions existingApps,
-                             AssistantIamActions iamActions) {
+                             AssistantIamActions iamActions, AssistantRuntimeActions runtime) {
         this.planner = planner;
         this.actions = actions;
         this.existingApps = existingApps;
         this.iamActions = iamActions;
+        this.runtime = runtime;
     }
 
     public State read(String owner, UUID sessionId, String authorization) {
@@ -52,10 +55,13 @@ public class AssistantWorkflow {
             AssistantAppDesign draft = session.draft != null && !session.published ? session.draft.design() : null;
             ExistingTarget target = existingTarget(session);
             var context = new AssistantPlanner.Context(request.strip(), List.copyOf(session.turns), draft,
-                    session.tenantId, tenants, target, session.iamApplied ? null : session.iamRequest, studioAccess);
+                    session.tenantId, tenants, target, session.iamApplied ? null : session.iamRequest, studioAccess,
+                    session.edit == null || session.published ? null : session.edit.newTable(), null, null, null, null);
             var decision = planner.plan(context);
             String message = decision.message();
-            if (decision.iam() != null) {
+            if (decision.business() != null) {
+                message = "请切换到应用工作区，打开业务页面后使用助手。";
+            } else if (decision.iam() != null) {
                 session.iamPlan = iamActions.prepare(authorization, decision.iam());
                 session.iamRequest = decision.iam();
                 session.iamRevision = UUID.randomUUID();
@@ -93,6 +99,75 @@ public class AssistantWorkflow {
             }
             return state(session, tenants);
         });
+    }
+
+    public RuntimeState readRuntime(String owner, UUID id) {
+        return withSession("runtime:" + owner, id, this::runtimeState);
+    }
+
+    public RuntimeState askRuntime(String owner, UUID id, String authorization, String request, String menu) {
+        if (request == null || request.isBlank() || request.length() > 1200) {
+            throw DomainException.invalidParams("请输入 1 到 1200 字的业务需求。");
+        }
+        return withSession("runtime:" + owner, id, session -> {
+            var pages = runtime.choices(authorization, menu);
+            var context = new AssistantPlanner.Context(request.strip(), List.copyOf(session.turns), null, null, List.of(),
+                    null, null, false, null, pages, session.businessChange, menu, LocalDate.now().toString());
+            var decision = planner.plan(context);
+            var change = decision.business();
+            String message = decision.message();
+            // A subsequent request invalidates the earlier confirmation, even if this request needs clarification.
+            session.businessPlan = null;
+            session.businessRevision = null;
+            session.businessApplied = false;
+            session.businessResult = null;
+            if (decision.draft() != null || decision.edit() != null || decision.iam() != null) {
+                message = "应用设计、租户和角色配置请在管理工作区处理。";
+            } else if (change != null) {
+                if (pages.stream().noneMatch(page -> page.menu().equals(change.menu()))) {
+                    message = "当前工作区没有这个业务页面。请先打开有权访问的页面，再告诉我需要做什么。";
+                } else {
+                    session.businessChange = change;
+                    try {
+                        if (AssistantRuntimeActions.isQuery(change.operation())) {
+                            session.businessResult = runtime.query(authorization, change);
+                            message = "已查询「" + session.businessResult.page() + "」。";
+                        } else {
+                            session.businessPlan = runtime.prepare(authorization, change);
+                            session.businessRevision = UUID.randomUUID();
+                            message = "请核对操作和记录，确认后执行。";
+                        }
+                    } catch (DomainException e) {
+                        message = e.getMessage();
+                    }
+                }
+            }
+            addTurn(session, new Turn("user", request.strip()));
+            if (message != null && !message.isBlank()) {
+                addTurn(session, new Turn("assistant", message.substring(0, Math.min(600, message.length()))));
+            }
+            return runtimeState(session);
+        });
+    }
+
+    public RuntimeState confirmRuntime(String owner, UUID id, String authorization, UUID revision) {
+        return withSession("runtime:" + owner, id, session -> {
+            if (revision == null || !revision.equals(session.businessRevision) || session.businessPlan == null) {
+                throw DomainException.concurrentConflict("业务方案已变化，请重新核对。");
+            }
+            if (!session.businessApplied) {
+                String message = runtime.apply(authorization, session.businessChange, session.businessPlan);
+                session.businessApplied = true;
+                addTurn(session, new Turn("assistant", message));
+            }
+            return runtimeState(session);
+        });
+    }
+
+    private RuntimeState runtimeState(Session session) {
+        var preview = session.businessPlan == null ? null : session.businessPlan.preview();
+        return new RuntimeState(List.copyOf(session.turns), preview, session.businessResult,
+                session.businessRevision, session.businessApplied);
     }
 
     public State selectTenant(String owner, UUID sessionId, String authorization, String tenantId) {
@@ -223,10 +298,17 @@ public class AssistantWorkflow {
         private boolean published;
         private String publishedTenantName;
         private List<PageLink> links = List.of();
+        private AssistantPlanner.BusinessChange businessChange;
+        private AssistantRuntimeActions.Plan businessPlan;
+        private AssistantRuntimeActions.Result businessResult;
+        private UUID businessRevision;
+        private boolean businessApplied;
     }
 
     public record State(List<Turn> turns, AssistantAppDesign draft, String appKey, UUID revision,
                         String tenantId, String publishedTenantName, List<TenantChoice> tenants,
                         boolean published, List<PageLink> links, EditPreview edit,
                         AssistantIamActions.Preview iam, UUID iamRevision, boolean iamApplied) {}
+    public record RuntimeState(List<Turn> turns, AssistantRuntimeActions.Preview operation,
+                               AssistantRuntimeActions.Result result, UUID businessRevision, boolean businessApplied) {}
 }

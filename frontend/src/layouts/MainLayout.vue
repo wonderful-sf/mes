@@ -144,7 +144,7 @@
             </template>
           </div>
         </template>
-        <div v-if="authStore.canAccessStudio || authStore.canManageTenants" class="lc-side-footer">
+        <div v-if="assistantAvailable" class="lc-side-footer">
           <button
             ref="assistantToggle"
             type="button"
@@ -174,7 +174,15 @@
           <router-view />
         </main>
       </div>
-      <MesAssistantPanel v-if="authStore.canAccessStudio || authStore.canManageTenants" :open="assistantOpen" @close="closeAssistant" @navigate="assistantOpen = false" />
+      <MesAssistantPanel
+        v-if="assistantAvailable"
+        :key="runtimeAssistant ? 'runtime' : 'management'"
+        :open="assistantOpen"
+        :runtime="runtimeAssistant"
+        :menu="activeRuntimeMenu"
+        @close="closeAssistant"
+        @navigate="assistantOpen = false"
+      />
     </div>
 
     <!-- 全局模型设计器与版本中心弹窗 -->
@@ -275,6 +283,8 @@ const activeRuntimeMenu = computed(() => {
   const menuName = decodeURIComponent(String(route.params.menuName || ''));
   return appStore.findMenuNode(menuName, route.path)?.name || menuName;
 });
+const runtimeAssistant = computed(() => appStore.workspaceMode === 'runtime');
+const assistantAvailable = computed(() => runtimeAssistant.value || authStore.canAccessStudio || authStore.canManageTenants);
 
 function switchStudioTab(tab) {
   sidebarOpen.value = false;

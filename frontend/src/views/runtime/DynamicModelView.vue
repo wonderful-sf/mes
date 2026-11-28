@@ -695,6 +695,10 @@ function openModelDesigner() {
   appStore.designerDialogState.visible = true;
 }
 
+watch(() => appStore.runtimeRecordChange, (change) => {
+  if (change?.path === route.path) executeSearch((page.value - 1) * pageSize.value);
+});
+
 function exportRuntimeCsv() {
   const cols = effectiveGridColumns.value;
   const escapeCsv = (s) => '"' + String(s ?? '').replace(/"/g, '""') + '"';

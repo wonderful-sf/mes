@@ -23,7 +23,7 @@
           <el-icon aria-hidden="true"><ArrowRight /></el-icon>
         </button>
       </div>
-      <div v-else role="log" aria-label="应用搭建对话">
+      <div v-else role="log" aria-label="助手对话">
         <article v-for="(turn, index) in turns" :key="index" class="assistant-turn" :class="'assistant-turn--' + turn.role">
           <div v-if="turn.role === 'user'" class="assistant-question">{{ turn.message }}</div>
           <p v-else class="assistant-message">{{ turn.message }}</p>
@@ -31,6 +31,46 @@
       </div>
       <p v-if="busy" class="assistant-state" role="status">{{ busy }}</p>
       <p v-if="error" class="assistant-state assistant-error" role="alert">{{ error }}</p>
+
+      <section v-if="state?.result" class="assistant-plan" aria-label="查询结果">
+        <div class="plan-heading">
+          <h3>{{ state.result.page }}</h3>
+          <span class="plan-state">共 {{ state.result.total }} 条</span>
+        </div>
+        <p v-if="state.result.rows.length && state.result.rows.length < state.result.total" class="plan-description">
+          显示前 {{ state.result.rows.length }} 条
+        </p>
+        <details v-for="(row, index) in state.result.rows" :key="index" class="plan-table" :open="index === 0">
+          <summary>{{ Object.values(row)[0] || '记录 ' + (index + 1) }}</summary>
+          <dl class="assistant-details">
+            <template v-for="(value, label) in row" :key="label">
+              <dt>{{ label }}</dt><dd>{{ value }}</dd>
+            </template>
+          </dl>
+        </details>
+        <div class="plan-actions">
+          <RouterLink :to="state.result.link.path" @click="afterLink">打开页面</RouterLink>
+        </div>
+      </section>
+      <section v-if="state?.operation" class="assistant-plan" aria-label="业务操作方案">
+        <div class="plan-heading">
+          <h3>{{ state.operation.operation }}</h3>
+          <span class="plan-state" :class="{ 'is-published': state.businessApplied }">{{ state.businessApplied ? '已执行' : '待确认' }}</span>
+        </div>
+        <p class="plan-description">{{ state.operation.page }}</p>
+        <p v-if="!state.businessApplied && state.operation.confirmText" class="plan-description">{{ state.operation.confirmText }}</p>
+        <dl class="assistant-details">
+          <template v-for="(value, label) in state.operation.details" :key="label">
+            <dt>{{ label }}</dt><dd>{{ value }}</dd>
+          </template>
+        </dl>
+        <div class="plan-actions">
+          <RouterLink :to="state.operation.link.path" @click="afterLink">打开页面</RouterLink>
+          <el-button v-if="!state.businessApplied" type="primary" :disabled="Boolean(busy)" @click="confirmBusiness">
+            确认{{ state.operation.operation }}
+          </el-button>
+        </div>
+      </section>
 
       <section v-if="state?.draft" class="assistant-plan" aria-label="应用上线方案">
         <div class="plan-heading">
@@ -99,9 +139,11 @@
       <section v-if="state?.edit" class="assistant-plan" aria-label="已有应用版本变更">
         <div class="plan-heading">
           <h3>{{ state.edit.target.appName }}</h3>
-          <span class="plan-state" :class="{ 'is-published': state.published }">{{ state.published ? '新版本已上线' : '新版本草稿已保存' }}</span>
+          <span class="plan-state" :class="{ 'is-published': state.published }">
+            {{ state.edit.newTable ? (state.published ? '新表已上线' : '新表草稿已保存') : (state.published ? '新版本已上线' : '新版本草稿已保存') }}
+          </span>
         </div>
-        <p class="plan-description">{{ state.edit.target.tableName }} · {{ state.edit.baseVersion }} → {{ state.edit.newVersion }}</p>
+        <p class="plan-description">{{ state.edit.target.tableName }} · {{ state.edit.newTable ? state.edit.newVersion : state.edit.baseVersion + ' → ' + state.edit.newVersion }}</p>
         <details class="plan-table" open>
           <summary>字段变更 <span>{{ state.edit.changes.length }} 项</span></summary>
           <ul>
@@ -113,7 +155,9 @@
         </details>
         <div v-if="!state.published" class="plan-actions">
           <RouterLink to="/studio/models" @click="afterLink">查看数据表</RouterLink>
-          <el-button type="primary" :loading="publishing" :disabled="Boolean(busy)" @click="publish">确认发布新版本</el-button>
+          <el-button type="primary" :loading="publishing" :disabled="Boolean(busy)" @click="publish">
+            {{ state.edit.newTable ? '确认发布新表' : '确认发布新版本' }}
+          </el-button>
         </div>
         <div v-else class="assistant-links" aria-label="已更新页面">
           <RouterLink v-for="link in visibleLinks" :key="link.path" :to="link.path" @click="afterLink">
@@ -146,7 +190,7 @@ import { requestMesAssistant } from '@/api/assistant';
 import { useAppStore } from '@/stores/app';
 import { useAuthStore } from '@/stores/auth';
 
-const props = defineProps({ open: Boolean });
+const props = defineProps({ open: Boolean, runtime: Boolean, menu: String });
 const emit = defineEmits(['close', 'navigate']);
 const appStore = useAppStore();
 const authStore = useAuthStore();
@@ -159,16 +203,18 @@ const busy = ref('');
 const sending = computed(() => Boolean(pendingMessage.value));
 const publishing = ref(false);
 const error = ref('');
-const storageKey = 'mes-release-session:' + authStore.currentUser?.id;
+const storageKey = (props.runtime ? 'mes-runtime-session:' : 'mes-release-session:') + authStore.currentUser?.id;
 const sessionId = ref(sessionStorage.getItem(storageKey) || makeSessionId());
 const turns = computed(() => pendingMessage.value
   ? [...(state.value?.turns || []), { role: 'user', message: pendingMessage.value }]
   : state.value?.turns || []);
-const selectedTenant = computed(() => state.value?.tenants.find(tenant => tenant.id === state.value?.tenantId));
+const selectedTenant = computed(() => state.value?.tenants?.find(tenant => tenant.id === state.value?.tenantId));
 const visibleLinks = computed(() => (state.value?.links || []).filter(link => appStore.findMenuNode('', link.path)));
-const examples = computed(() => [
-  ...(authStore.canAccessStudio ? ['搭建设备点检应用，记录设备、点检日期和结果'] : []),
-  ...(authStore.canManageTenants ? ['创建一个名为一车间的租户，编码 workshop_1', '给一车间创建巡检员岗位，只能查看点检记录'] : [])
+const examples = computed(() => props.runtime ? [
+  ...(props.menu ? ['查询当前页面的前 5 条记录', '统计当前页面有多少条记录'] : ['我可以查询哪些业务页面？'])
+] : [
+  ...(authStore.canAccessStudio ? ['搭建设备点检应用，记录设备、点检日期和结果', '给已有应用新增一张数据表'] : []),
+  ...(authStore.canManageTenants ? ['创建一个名为一车间的租户，编码 workshop_1'] : [])
 ]);
 const fieldNames = {
   String: '文本',
@@ -203,7 +249,7 @@ watch(() => props.open, async (isOpen) => {
   if (!state.value && !busy.value) await perform('正在加载会话…');
   await scrollToLatest();
   input.value?.focus({ preventScroll: true });
-});
+}, { immediate: true });
 onBeforeUnmount(() => request?.abort());
 
 function useExample(question) {
@@ -236,7 +282,8 @@ async function submit() {
   draft.value = '';
   pendingMessage.value = question;
   scrollToLatest();
-  const saved = await perform('正在整理需求并保存草稿…', '/messages', { message: question });
+  const payload = props.runtime ? { message: question, menu: props.menu || null } : { message: question };
+  const saved = await perform(props.runtime ? '正在处理业务需求…' : '正在整理需求…', '/messages', payload);
   pendingMessage.value = '';
   if (!saved && !draft.value) draft.value = question;
   scrollToLatest();
@@ -266,6 +313,13 @@ async function confirmIam() {
   }
 }
 
+async function confirmBusiness() {
+  if (!state.value?.businessRevision || busy.value) return;
+  if (await perform('正在执行确认的业务操作…', '/confirm', { revision: state.value.businessRevision })) {
+    appStore.runtimeRecordChange = { path: state.value.operation.link.path };
+  }
+}
+
 async function newSession() {
   sessionId.value = makeSessionId();
   state.value = null;
@@ -280,7 +334,8 @@ async function perform(label, action, payload) {
   error.value = '';
   request = new AbortController();
   try {
-    state.value = await requestMesAssistant(authStore.token, sessionId.value, action, payload, request.signal);
+    const endpoint = (props.runtime ? '/runtime' : '') + (action || '');
+    state.value = await requestMesAssistant(authStore.token, sessionId.value, endpoint, payload, request.signal);
     return true;
   } catch (e) {
     if (e.name !== 'AbortError') error.value = e.message;
@@ -391,6 +446,9 @@ h2 { font-size: 16px; }
 .plan-table summary span { float: inline-end; }
 .plan-table ul { margin: 0 0 8px; padding: 0; list-style: none; }
 .plan-table li { padding: 3px 0; }
+.assistant-details { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 5px 10px; margin: 8px 0; }
+.assistant-details dt { color: var(--text-muted); }
+.assistant-details dd { margin: 0; overflow-wrap: anywhere; }
 .plan-table summary span, .plan-table li span { color: var(--text-muted); font-size: 12px; font-weight: 400; }
 .plan-tenant { display: grid; gap: 4px; margin: 10px 0; font-weight: 650; }
 .plan-tenant select {

@@ -58,7 +58,7 @@ public record AssistantAppDesign(String name, String description, List<Table> ta
                 "models", models, "menus", menus);
     }
 
-    private List<Map<String, Object>> properties(Table table, Map<String, String> targets) {
+    static List<Map<String, Object>> properties(Table table, Map<String, String> targets) {
         List<Field> fields = table.fields();
         if (fields == null || fields.isEmpty() || fields.size() > 24) invalid("每张表需要 1 到 24 个字段。");
         Set<String> keys = new HashSet<>();
@@ -74,6 +74,12 @@ public record AssistantAppDesign(String name, String description, List<Table> ta
             properties.add(property);
         }
         return properties;
+    }
+
+    static void validateTable(Table table) {
+        if (table == null) invalid("数据表定义为空。");
+        requireKey(table.key(), "数据表标识");
+        requireText(table.name(), 60, "数据表名称");
     }
 
     static Map<String, Object> property(Field field, Map<String, String> targets) {

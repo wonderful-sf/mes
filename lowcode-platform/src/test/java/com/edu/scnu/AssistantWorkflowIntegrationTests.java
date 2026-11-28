@@ -11,6 +11,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.client.RestTestClient;
+import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -18,6 +19,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -221,6 +223,107 @@ class AssistantWorkflowIntegrationTests {
         rpc(inspector, model, "create", newRecord);
     }
 
+    @Test
+    void publishesANewTableInsideAnExistingApplication() {
+        String admin = login("admin");
+        String app = "table_target_qa";
+        String original = "original_table_qa";
+        String model = app + "_handover";
+        rpc(admin, "meta_app", "importPackage", Map.of("autoPublish", true, "package", Map.of(
+                "app", Map.of("name", app, "displayName", "原有质检应用", "description", "保留原有说明"),
+                "models", List.of(Map.of("name", original, "displayName", "质检记录", "properties", List.of(
+                        Map.of("name", "title", "displayName", "标题", "dataType", "String")))))));
+        String originalId = rpc(admin, original, "create", Map.of("values", Map.of("title", "已有记录"))).path("id").asText();
+        String path = "/api/assistant/sessions/" + UUID.randomUUID();
+        var first = post(admin, path + "/messages", Map.of("message", "测试给原有质检应用新增交接表"), 200);
+        assertThat(first.path("edit").path("newTable").asBoolean()).isTrue();
+        assertThat(first.path("edit").path("target").path("tableKey").asText()).isEqualTo(model);
+        assertThat(rpc(admin, "ui_menu", "loadMenu", Map.of()).toString()).doesNotContain(model + "_menu");
+        var updated = post(admin, path + "/messages", Map.of("message", "测试交接表补充交接人"), 200);
+        assertThat(updated.path("edit").path("changes").size()).isEqualTo(3);
+        post(admin, path + "/publish", Map.of("revision", first.path("revision").asText()), 409);
+        var published = post(admin, path + "/publish", Map.of("revision", updated.path("revision").asText()), 200);
+        assertThat(published.path("links").toString()).contains("/menu/" + model + "_menu");
+        var view = rpc(admin, "ui_view", "loadView", Map.of("menu", model + "_menu"));
+        assertThat(view.path("views").path("form").toString()).contains("交接人", "质检记录");
+        rpc(admin, model, "create", Map.of("values", Map.of("title", "交接 001", "inspection", originalId, "operator", "班组长")));
+        assertThat(rpc(admin, model, "search", Map.of()).toString()).contains("交接 001");
+        assertThat(rpc(admin, original, "find", Map.of("id", originalId)).path("title").asText()).isEqualTo("已有记录");
+        assertThat(rpc(admin, "meta_app", "list", Map.of()).toString()).contains("保留原有说明");
+    }
+
+    @Test
+    void worksInExpressWorkspaceWithTenantScopeAndExplicitWriteConfirmation() throws IOException {
+        String admin = login("admin");
+        var express = JSON.readValue(Files.readString(Path.of("..", "docs", "express-station-package.json")),
+                new TypeReference<Map<String, Object>>() {});
+        rpc(admin, "meta_app", "importPackage", Map.of("package", express, "autoPublish", true));
+        String clerk = expressWorker(admin, "qa_station_a", "qa_station_clerk", "ROLE_APP_USER");
+        String other = expressWorker(admin, "qa_station_b", "qa_station_other", "ROLE_APP_USER");
+        String readonlyRole = "ROLE_QA_STATION_READONLY";
+        rpc(admin, "rbac_role", "saveRole", Map.of("values", Map.of("tenantId", "qa_station_a", "name", "验收只读",
+                "code", readonlyRole, "allowedMenus", List.of("exp_parcel_menu"), "allowedServices",
+                List.of("exp_parcel:search", "ui_menu:loadMenu", "ui_view:loadView"))));
+        rpc(admin, "rbac_user", "saveUser", Map.of("values", Map.of("username", "qa_station_readonly",
+                "password", "123456", "tenantId", "qa_station_a", "roleCodes", List.of(readonlyRole))));
+        rpc(other, "exp_parcel", "create", Map.of("values", Map.of("tracking_no", "QA-HIDDEN-102",
+                "courier_brand", "SF", "recipient_name", "外站样例", "recipient_phone", "13800138002")));
+        String shelf = rpc(clerk, "exp_shelf", "create", Map.of("values", Map.of(
+                "shelf_code", "A区-助手验收架", "zone_type", "A", "capacity", 3, "manager_name", "验收主管"))).path("id").asText();
+        String path = "/api/assistant/sessions/" + UUID.randomUUID();
+        client.get().uri(path).headers(headers -> headers.setBearerAuth(clerk)).exchange().expectStatus().isForbidden();
+        client.get().uri(path + "/runtime").exchange().expectStatus().isUnauthorized();
+
+        var create = runtimeMessage(clerk, path, "测试登记助手包裹");
+        assertThat(create.path("operation").path("operation").asText()).withFailMessage("No create proposal: %s", create).isEqualTo("新增记录");
+        assertThat(rpc(clerk, "exp_parcel", "count", Map.of()).asInt()).isZero();
+        confirmRuntime(clerk, path, create, 200);
+        var parcel = rpc(clerk, "exp_parcel", "search", Map.of()).path("records").get(0);
+        assertThat(parcel.path("tracking_no").asText()).isEqualTo("QA-PARCEL-101");
+        String parcelId = parcel.path("id").asText();
+        rpc(clerk, "exp_parcel", "putOnShelf", Map.of("id", parcelId, "shelf_id", shelf));
+
+        var search = runtimeMessage(clerk, path, "测试查询待取件包裹");
+        assertThat(search.path("result").path("total").asInt()).isEqualTo(1);
+        assertThat(search.path("result").path("rows").toString()).contains("QA-PARCEL-101").doesNotContain("QA-HIDDEN-102");
+        var count = runtimeMessage(clerk, path, "测试统计工作区包裹");
+        assertThat(count.path("result").path("total").asInt()).isEqualTo(1);
+
+        String readonly = login("qa_station_readonly");
+        String deniedPath = "/api/assistant/sessions/" + UUID.randomUUID();
+        var denied = runtimeMessage(readonly, deniedPath, "测试核验取件出库");
+        assertThat(denied.path("operation").isNull()).isTrue();
+        assertThat(denied.path("turns").toString()).contains("没有执行权限");
+        var first = runtimeMessage(clerk, path, "测试核验取件出库");
+        assertThat(first.path("operation").path("operation").asText()).withFailMessage("No pickup proposal: %s", first).isEqualTo("核验取件出库");
+        assertThat(rpc(clerk, "exp_outbound", "count", Map.of()).asInt()).isZero();
+        confirmRuntime(other, path, first, 409);
+        rpc(clerk, "exp_parcel", "update", Map.of("id", parcelId, "values", Map.of("recipient_name", "更新后样例")));
+        confirmRuntime(clerk, path, first, 409);
+        var second = runtimeMessage(clerk, path, "测试核验取件出库");
+        assertThat(confirmRuntime(clerk, path, second, 200).path("businessApplied").asBoolean()).isTrue();
+        confirmRuntime(clerk, path, second, 200);
+        assertThat(rpc(clerk, "exp_outbound", "count", Map.of()).asInt()).isEqualTo(1);
+        assertThat(rpc(clerk, "exp_parcel", "find", Map.of("id", parcelId)).path("status").asText()).isEqualTo("PICKED");
+    }
+
+    private String expressWorker(String admin, String tenant, String user, String role) {
+        rpc(admin, "rbac_tenant", "saveTenant", Map.of("values", Map.of("code", tenant, "name", tenant)));
+        rpc(admin, "rbac_tenant", "authorizeApps", Map.of("tenantId", tenant,
+                "authorizedApps", List.of("express_station_app"), "authorizedMenus", List.of("exp_parcel_menu", "exp_shelf_menu")));
+        rpc(admin, "rbac_user", "saveUser", Map.of("values", Map.of(
+                "username", user, "password", "123456", "tenantId", tenant, "roleCodes", List.of(role))));
+        return login(user);
+    }
+
+    private JsonNode runtimeMessage(String token, String path, String message) {
+        return post(token, path + "/runtime/messages", Map.of("message", message, "menu", "exp_parcel_menu"), 200);
+    }
+
+    private JsonNode confirmRuntime(String token, String path, JsonNode plan, int status) {
+        return post(token, path + "/runtime/confirm", Map.of("revision", plan.path("businessRevision").asText()), status);
+    }
+
     private String appState(String token, String app) {
         for (JsonNode item : rpc(token, "meta_app", "list", Map.of())) {
             if (app.equals(item.path("name").asText())) return item.path("state").asText();
@@ -267,6 +370,46 @@ class AssistantWorkflowIntegrationTests {
             JsonNode call = JSON.readTree(exchange.getRequestBody().readAllBytes());
             JsonNode context = JSON.readTree(call.path("messages").get(1).path("content").asText());
             String request = context.path("request").asText();
+            if (request.contains("测试给原有质检应用新增交接表") || request.contains("测试交接表补充交接人")) {
+                boolean followUp = request.contains("补充交接人");
+                if (followUp && !"handover".equals(context.path("pendingTable").path("key").asText())) {
+                    exchange.sendResponseHeaders(400, -1);
+                    return;
+                }
+                respond(exchange, """
+                        {"message":"请核对新表。","edit":{"appQuery":"原有质检应用","newTable":{
+                        "key":"handover","name":"异常件交接","fields":[
+                        {"key":"title","name":"标题","type":"String","required":true},
+                        {"key":"inspection","name":"质检记录","type":"ManyToOne","relatedTable":"质检记录"}%s]}}}
+                        """.formatted(followUp ? ",{\"key\":\"operator\",\"name\":\"交接人\",\"type\":\"String\"}" : ""));
+                return;
+            }
+            if (context.path("runtimePages").isArray()) {
+                if (!"exp_parcel_menu".equals(context.path("currentMenu").asText())
+                        || context.path("runtimePages").toString().contains("QA-HIDDEN-102")) {
+                    exchange.sendResponseHeaders(400, -1);
+                    return;
+                }
+                String business = switch (request) {
+                    case "测试登记助手包裹" -> """
+                            {"operation":"create","values":{"tracking_no":"QA-PARCEL-101","courier_brand":"SF",
+                            "recipient_name":"样例收件人","recipient_phone":"13800138001"}}
+                            """;
+                    case "测试查询待取件包裹" -> """
+                            {"operation":"search","where":[{"field":"status","operator":"=","value":"READY"}],
+                            "columns":["tracking_no","status"]}
+                            """;
+                    case "测试统计工作区包裹" -> """
+                            {"operation":"count"}
+                            """;
+                    default -> """
+                            {"operation":"confirmPickup","where":[{"field":"tracking_no","operator":"=","value":"QA-PARCEL-101"}]}
+                            """;
+                };
+                respond(exchange, "{\"message\":\"业务请求\",\"business\":{\"menu\":\"exp_parcel_menu\","
+                        + business.strip().substring(1) + "}");
+                return;
+            }
             if (request.contains("测试创建云枢演示租户")) {
                 respond(exchange, """
                         {"message":"请确认新租户方案。","iam":{"action":"createTenant","name":"云枢演示租户","code":"assistant_workshop_qa"}}

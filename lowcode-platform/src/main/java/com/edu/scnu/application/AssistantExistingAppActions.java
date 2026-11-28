@@ -53,6 +53,10 @@ public class AssistantExistingAppActions {
         platform.call(authorization, "meta_model", "listModels", Map.of());
         List<ModelAggregate> candidates = models.findModelsByApp(app.getName()).stream()
                 .filter(model -> model.isAvailableForRuntime() && !model.isKernelModel()).toList();
+        if (change.newTable() != null) return stageNewTable(authorization, app, change, candidates, previous);
+        if (previous != null && previous.newTable() != null) {
+            throw new Clarification("当前有待发布的新表。请继续修改这张新表，或开启新会话修改其他表。");
+        }
         String defaultTable = reference != null && app.getName().equals(reference.appKey()) ? reference.tableKey() : null;
         String tableQuery = suppliedOr(change.tableQuery(), defaultTable);
         if (tableQuery == null && candidates.size() != 1) {
@@ -81,16 +85,70 @@ public class AssistantExistingAppActions {
         snapshot.setVersionNo(version);
         ModelVersion saved = (ModelVersion) platform.call(authorization, "meta_model", "saveDraft", Map.of("snapshot", snapshot));
         return new SavedEdit(base.getId(), saved.getId(), saved.getSnapshotJson(), saved.getPendingUiJson(),
-                new EditPreview(target, base.getVersionNo(), version, changes));
+                new EditPreview(target, base.getVersionNo(), version, changes, false), null);
+    }
+
+    private SavedEdit stageNewTable(String authorization, AppAggregate app, ExistingChange change,
+                                    List<ModelAggregate> candidates, SavedEdit previous) {
+        AssistantAppDesign.Table table = change.newTable();
+        AssistantAppDesign.validateTable(table);
+        if ((change.addFields() != null && !change.addFields().isEmpty())
+                || (change.renameFields() != null && !change.renameFields().isEmpty())) {
+            throw new Clarification("请先完成新表的设计，再修改其他数据表。");
+        }
+        String modelName = AssistantAppDesign.modelName(app.getName(), table);
+        if (previous != null) {
+            if (previous.newTable() == null || !modelName.equals(previous.preview().target().tableKey())) {
+                throw new Clarification("当前已有待发布的表草稿。请先发布，或开启新会话。");
+            }
+            verify(previous);
+        }
+        requireNewTableAvailable(app.getName(), modelName, table.name(), previous != null);
+        Map<String, String> targets = new LinkedHashMap<>();
+        targets.put(table.key(), modelName);
+        for (ModelAggregate candidate : candidates) targets.put(candidate.getName(), candidate.getName());
+        for (AssistantAppDesign.Field field : table.fields() == null ? List.<AssistantAppDesign.Field>of() : table.fields()) {
+            if (field != null && "ManyToOne".equals(field.type()) && !targets.containsKey(field.relatedTable())) {
+                ModelAggregate related = choose(candidates, field.relatedTable(), ModelAggregate::getName, ModelAggregate::getDisplayName, "关联表");
+                targets.put(field.relatedTable(), related.getName());
+            }
+        }
+        ModelSnapshot snapshot = new ModelSnapshot();
+        snapshot.setName(modelName);
+        snapshot.setDisplayName(table.name());
+        snapshot.setAppName(app.getName());
+        snapshot.setVersionNo("1.0.0");
+        snapshot.setProperties(AssistantAppDesign.properties(table, targets).stream()
+                .map(property -> json.convertValue(property, PropertyDef.class)).toList());
+        ModelVersion saved = (ModelVersion) platform.call(authorization, "meta_model", "saveDraft", Map.of("snapshot", snapshot));
+        var fields = snapshot.getProperties().stream().map(field -> new FieldChange(field.getName(),
+                field.getDisplayName(), field.getDataType(), field.isRequired(), null)).toList();
+        var target = new ExistingTarget(app.getName(), app.getDisplayName(), modelName, table.name());
+        return new SavedEdit(null, saved.getId(), saved.getSnapshotJson(), saved.getPendingUiJson(),
+                new EditPreview(target, null, "1.0.0", fields, true), table);
+    }
+
+    private void requireNewTableAvailable(String app, String model, String label, boolean ownDraft) {
+        boolean collision = models.findAllModels().stream()
+                .filter(candidate -> !ownDraft || !model.equals(candidate.getName()))
+                .anyMatch(candidate -> equalsName(model, candidate.getName()) || equalsName(model, candidate.getTableName())
+                        || (app.equals(candidate.getAppName()) && equalsName(label, candidate.getDisplayName())));
+        if (collision || ui.findMenuByName(model + "_menu").isPresent()) {
+            throw DomainException.concurrentConflict("已有同名数据表、物理表或菜单，请选择其他表名。");
+        }
     }
 
     @Transactional(rollbackFor = Exception.class)
     public List<PageLink> publish(String authorization, SavedEdit edit) {
         verify(edit);
         ExistingTarget target = edit.preview().target();
+        if (edit.newTable() != null) {
+            choose(availableApps(authorization), target.appKey(), AppAggregate::getName, AppAggregate::getName, "应用");
+            requireNewTableAvailable(target.appKey(), target.tableKey(), target.tableName(), true);
+        }
         platform.reloadRegistryOnRollback();
         platform.publishVersion(authorization, target.tableKey(), edit.versionId());
-        syncViewColumns(authorization, target.tableKey(), edit.preview().changes());
+        if (edit.newTable() == null) syncViewColumns(authorization, target.tableKey(), edit.preview().changes());
         return ui.findAllMenus().stream()
                 .filter(menu -> menu.isActive() && target.appKey().equals(menu.getAppName()) && target.tableKey().equals(menu.getModel()))
                 .map(menu -> new PageLink(menu.getDisplayName(), menuPath(menu))).toList();
@@ -173,8 +231,9 @@ public class AssistantExistingAppActions {
     private ModelVersion verify(SavedEdit edit) {
         ExistingTarget target = edit.preview().target();
         ModelAggregate model = models.findModelByName(target.tableKey())
-                .filter(m -> m.isAvailableForRuntime() && target.appKey().equals(m.getAppName())
-                        && edit.baseId().equals(m.getActiveVersionId())).orElseThrow(this::stale);
+                .filter(m -> target.appKey().equals(m.getAppName())
+                        && (edit.newTable() != null ? m.getActiveVersionId() == null
+                            : m.isAvailableForRuntime() && edit.baseId().equals(m.getActiveVersionId()))).orElseThrow(this::stale);
         return models.findVersionById(edit.versionId())
                 .filter(v -> model.getName().equals(v.getModelName()) && !v.isImmutable()
                         && Objects.equals(v.getSnapshotJson(), edit.snapshotJson())
@@ -229,8 +288,9 @@ public class AssistantExistingAppActions {
     }
 
     public record FieldChange(String key, String label, String type, boolean required, String previousLabel) {}
-    public record EditPreview(ExistingTarget target, String baseVersion, String newVersion, List<FieldChange> changes) {}
-    public record SavedEdit(String baseId, String versionId, String snapshotJson, String pendingUiJson, EditPreview preview) {}
+    public record EditPreview(ExistingTarget target, String baseVersion, String newVersion, List<FieldChange> changes, boolean newTable) {}
+    public record SavedEdit(String baseId, String versionId, String snapshotJson, String pendingUiJson,
+                            EditPreview preview, AssistantAppDesign.Table newTable) {}
 
     public static final class Clarification extends RuntimeException {
         Clarification(String message) { super(message); }

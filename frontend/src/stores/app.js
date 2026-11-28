@@ -25,6 +25,7 @@ export const useAppStore = defineStore('app', () => {
 
   const menuTree = ref([]);
   const menuLoaded = ref(false);
+  const runtimeRecordChange = ref(null);
   const appsList = ref([]);
   const modelsSummary = ref([]);
   const publishTimeline = ref([]);
@@ -269,6 +270,7 @@ export const useAppStore = defineStore('app', () => {
     menuTree,
     menuLoaded,
     runtimeNavigation,
+    runtimeRecordChange,
     appsList,
     modelsSummary,
     publishTimeline,

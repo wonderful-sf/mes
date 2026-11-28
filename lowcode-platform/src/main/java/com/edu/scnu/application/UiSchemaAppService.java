@@ -457,6 +457,8 @@ public class UiSchemaAppService {
         Map<String, Boolean> svcPerms = new LinkedHashMap<>();
         if (ctx == null || ctx.isSuperUser()) {
             auth.put("read", true);
+            auth.put("search", true);
+            auth.put("count", true);
             auth.put("create", true);
             auth.put("update", true);
             auth.put("delete", true);
@@ -470,6 +472,8 @@ public class UiSchemaAppService {
 
         List<RoleDef> roles = iamAppService.resolveRoles(ctx.getRoleCodes());
         auth.put("read", hasPerm(roles, modelName, "search") || hasPerm(roles, modelName, "find") || hasPerm(roles, modelName, "read"));
+        auth.put("search", hasPerm(roles, modelName, "search"));
+        auth.put("count", hasPerm(roles, modelName, "count"));
         auth.put("create", hasPerm(roles, modelName, "create"));
         auth.put("update", hasPerm(roles, modelName, "update"));
         auth.put("delete", hasPerm(roles, modelName, "delete"));
